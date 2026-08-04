@@ -7,3 +7,6 @@ scipy>=1.10
 # optional for jersey OCR:
 easyocr>=1.7
 torch>=2.0
+# Streamlit UI:
+streamlit>=1.35
+pandas>=2.0
