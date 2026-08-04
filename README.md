@@ -22,6 +22,17 @@ Use `tracker_v2.py` for the full feature set: jersey OCR, speed trails, ball tra
 python tracker_v2.py --video play.mp4 --model yolov8m.pt --ocr --px_per_yard 12.3
 ```
 
+### Streamlit UI
+
+Nice browser UI with upload, player picker, live tracking preview, position filters, distance measure, speed charts, CSV/MP4 download:
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Deploy to Streamlit Cloud: set main file to `streamlit_app.py`. Use short clips on CPU – ~2-5 fps.
+
 ### How it works
 1. First frame: detections run, 22 field players auto-proposed
 2. Selection screen opens:
