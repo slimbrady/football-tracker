@@ -1,0 +1,9 @@
+tracker_type: ocsort
+# OC-SORT tuned for sports / football
+det_thresh: 0.25
+max_age: 60
+min_hits: 3
+iou_threshold: 0.3
+delta_t: 3
+inertia: 0.2
+use_byte: true
