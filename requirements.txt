@@ -10,3 +10,5 @@ torch>=2.0
 # Streamlit UI:
 streamlit>=1.35
 pandas>=2.0
+# Roboflow American Football model:
+roboflow>=1.1
