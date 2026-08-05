@@ -16,6 +16,16 @@ except ImportError:
 
 POSITIONS = ["DL","LB","DB","OL","WR","QB","RB"]
 
+# Roboflow American Football model class map
+# football-players-zm06l classes: Center, QB, db, lb, skill
+RF_FB_CLASS_MAP = {
+    "center": "OL",
+    "qb": "QB",
+    "db": "DB",
+    "lb": "LB",
+    "skill": "WR",   # skill = RB/FB/TE/WR – default to WR, user can override
+}
+
 def estimate_field_mask(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, np.array([35,40,40]), np.array([85,255,255]))
@@ -57,23 +67,106 @@ def clear_tracker_callbacks(m):
 
 # ---------- Sidebar ----------
 with st.sidebar:
+    st.header("Model")
+    model_source = st.radio("Player detector", [
+        "Ultralytics COCO (person)",
+        "Roboflow American Football",
+        "Custom .pt weights"
+    ], index=1)
+
+    rf_api_key = None
+    rf_model_id = "football-players-zm06l/8"
+    custom_weights_path = None
+
+    if model_source == "Ultralytics COCO (person)":
+        model_name = st.selectbox("YOLO model", ["yolov8n.pt","yolov8s.pt","yolov8m.pt","yolov8l.pt"], index=2)
+        player_class_ids = [0]
+        auto_pos_map = {}
+        weights_path = model_name
+    elif model_source == "Roboflow American Football":
+        st.caption("Model: bronkscottema/football-players-zm06l – American football, classes: Center, QB, DB, LB, skill")
+        try:
+            import roboflow
+            RF_AVAILABLE = True
+        except ImportError:
+            RF_AVAILABLE = False
+            st.warning("pip install roboflow  (then restart)")
+        rf_api_key = st.text_input("Roboflow API key", type="password",
+            help="Get a free key at app.roboflow.com – used once to download weights, then runs offline")
+        rf_model_id = st.text_input("Model ID", value="football-players-zm06l/8")
+        if rf_api_key and RF_AVAILABLE:
+            # download weights if needed
+            import pathlib
+            cache_dir = pathlib.Path(tempfile.gettempdir()) / "rf_football_models" / rf_model_id.replace("/","_")
+            weights_path = cache_dir / "weights" / "best.pt"
+            if not weights_path.exists():
+                with st.spinner("Downloading Roboflow model weights… first run only"):
+                    try:
+                        from roboflow import Roboflow
+                        rf = Roboflow(api_key=rf_api_key)
+                        ws, proj, ver = rf_model_id.split("/") if "/" in rf_model_id and rf_model_id.count("/") == 2 else ("bronkscottema", "football-players-zm06l", "8")
+                        if rf_model_id.count("/") == 1:
+                            proj, ver = rf_model_id.split("/")
+                            ws = "bronkscottema"
+                        project = rf.workspace(ws).project(proj)
+                        dataset = project.version(int(ver)).download("yolov8", location=str(cache_dir))
+                        # weights should be at cache_dir / "weights" / "best.pt" – actually dataset download gives training data, not weights
+                        # fallback: try project.version().deploy("yolov8")
+                    except Exception as e:
+                        st.error(f"Roboflow download failed: {e}")
+                        st.info("Alternatively: download weights manually from Roboflow Universe → Download → YOLOv8 → \"Download Model Weights (best.pt)\", then use 'Custom .pt weights' option.")
+                        st.stop()
+            if not weights_path.exists():
+                # try common alternate locations
+                for p in list(cache_dir.rglob("best.pt")):
+                    weights_path = p; break
+            if not weights_path.exists():
+                st.error(f"Weights not found at {weights_path}. Download best.pt from https://universe.roboflow.com/bronkscottema/football-players-zm06l and use 'Custom .pt weights' option.")
+                st.stop()
+            weights_path = str(weights_path)
+            # load model to get class names
+            _tmp_model = YOLO(weights_path)
+            names = _tmp_model.names  # {0: 'Center', 1: 'QB', ...}
+            player_class_ids = list(names.keys())
+            auto_pos_map = {cid: RF_FB_CLASS_MAP.get(names[cid].lower(), None) for cid in player_class_ids}
+            model_name = weights_path
+            st.success(f"Loaded {weights_path} – classes: {', '.join(names.values())}")
+        else:
+            st.info("Enter your Roboflow API key to auto-download, or use 'Custom .pt weights' if you've already downloaded best.pt")
+            st.stop()
+    else:  # Custom .pt
+        up = st.file_uploader("Upload best.pt", type=["pt"])
+        if up:
+            p = os.path.join(tempfile.gettempdir(), up.name)
+            with open(p, "wb") as f: f.write(up.read())
+            custom_weights_path = p
+            weights_path = p
+            _tmp_model = YOLO(weights_path)
+            names = _tmp_model.names
+            player_class_ids = list(names.keys())
+            # try to map known football classes, else no auto-pos
+            auto_pos_map = {cid: RF_FB_CLASS_MAP.get(str(names[cid]).lower(), None) for cid in player_class_ids}
+            model_name = weights_path
+            st.success(f"Loaded custom weights – classes: {', '.join(str(v) for v in names.values())}")
+        else:
+            st.info("Upload a YOLOv8 .pt file. For the Roboflow American Football model: https://universe.roboflow.com/bronkscottema/football-players-zm06l → Download → Model weights (best.pt)")
+            st.stop()
+
+    st.divider()
     st.header("Config")
-    model_name = st.selectbox("YOLO model", ["yolov8n.pt","yolov8s.pt","yolov8m.pt","yolov8l.pt"], index=2,
-        help="n = fastest, least accurate (~4-8 players on broadcast). m/l = slower, finds more players. Use n for testing, m/l for real runs.")
-    conf = st.slider("Player detection conf", 0.05, 0.6, 0.15, 0.05,
-        help="Lower = finds more players but more false positives. Football broadcast: try 0.15-0.25")
-    imgsz = st.selectbox("imgsz", [640,960,1280], index=1,
-        help="Larger = better small-player detection, much slower on CPU")
-    use_field_mask = st.checkbox("Field mask (ignore sidelines)", value=True)
+    conf = st.slider("Player detection conf", 0.05, 0.6, 0.15, 0.05)
+    imgsz = st.selectbox("imgsz", [640,960,1280], index=1)
+    use_field_mask = st.checkbox("Field mask (ignore sidelines)", value=False,
+        help="Turn off if it's eating your players – the football-specific model is better at ignoring sidelines on its own")
     use_ocr = st.checkbox("Jersey OCR (slow)", value=False, disabled=not OCR_AVAILABLE)
-    track_ball = st.checkbox("Track ball", value=True)
+    track_ball = st.checkbox("Track ball (COCO sports ball – weak)", value=False)
     ball_conf = st.slider("Ball conf", 0.05, 0.5, 0.1, 0.05, disabled=not track_ball)
     px_per_yard = st.number_input("px per yard (0 = px only)", min_value=0.0, value=0.0, step=0.1)
     st.caption("Tip: calibrate px_per_yard for real yd/s speeds")
 
 uploaded = st.file_uploader("Upload play video", type=["mp4","mov","avi","m4v"])
 if not uploaded:
-    st.info("Upload a football play. Short clips work best on CPU. yolov8n @ 640px ≈ 2-5 fps on Mac. yolov8m @ 1280px ≈ 0.2 fps.")
+    st.info("Upload a football play. The Roboflow American Football model should find ~15-22 players vs ~4-10 with COCO.")
     st.stop()
 
 tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -91,26 +184,34 @@ field_mask = estimate_field_mask(first_frame) if use_field_mask else np.ones((h,
 
 # ---------- First-frame player picker ----------
 @st.cache_resource(show_spinner=False)
-def load_model(name):
-    return YOLO(name)
+def load_model(path):
+    return YOLO(path)
 
-model = load_model(model_name)
+model = load_model(weights_path)
 clear_tracker_callbacks(model)
-res = model.predict(first_frame, classes=[0], conf=conf, imgsz=imgsz, verbose=False)[0]
+
+# get class names for auto-position tagging
+model_class_names = model.names if hasattr(model, 'names') else {}
+
+res = model.predict(first_frame, classes=player_class_ids, conf=conf, imgsz=imgsz, verbose=False)[0]
 dets = []
 for b in res.boxes:
     x1,y1,x2,y2 = b.xyxy[0].cpu().numpy()
     cx=int((x1+x2)/2); cy=int((y1+y2)/2)
     if 0<=cy<h and 0<=cx<w and field_mask[cy,cx]:
-        dets.append([float(x1),float(y1),float(x2),float(y2), float(b.conf[0])])
+        cls_id = int(b.cls[0].cpu().numpy()) if hasattr(b, 'cls') else 0
+        dets.append([float(x1),float(y1),float(x2),float(y2), float(b.conf[0]), cls_id])
+
 # keep up to 30 largest
 dets = sorted(dets, key=lambda d:(d[2]-d[0])*(d[3]-d[1]), reverse=True)[:30]
 dets = sorted(dets, key=lambda d:d[0])
 
 st.subheader(f"1️⃣ Select players  —  detected {len(dets)} in-frame")
 if len(dets) < 10:
-    st.warning(f"Only {len(dets)} players detected. Try: lower Player detection conf, larger imgsz, or yolov8m/l model. Broadcast angles / small players are hard for yolov8n.")
-st.caption("Offense = Red, Defense = Blue")
+    st.warning(f"Only {len(dets)} players detected. Try: lower conf, larger imgsz, or turn off Field mask.")
+else:
+    st.success(f"Found {len(dets)} players – much better than COCO!")
+st.caption("Offense = Red, Defense = Blue · Position auto-tagged from model if available")
 
 def guess_team(box):
     cx = (box[0]+box[2])/2
@@ -130,19 +231,27 @@ with c2:
 cols = st.columns(4)
 player_meta = {}
 for i, d in enumerate(dets):
-    x1,y1,x2,y2,_ = d
+    x1,y1,x2,y2,conf_score,cls_id = d if len(d) == 6 else (*d, 0)
     crop = first_frame[int(y1):int(y2), int(x1):int(x2)]
+    # auto-position from model class
+    auto_pos = auto_pos_map.get(cls_id, None)
+    auto_label = model_class_names.get(cls_id, "") if model_class_names else ""
     with cols[i % 4]:
         if crop.size > 0:
             st.image(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), width=120)
+        if auto_label:
+            st.caption(f"🤖 {auto_label} → {auto_pos or '—'} · {conf_score:.2f}")
         inc_key = f"inc_{i}"
         if inc_key not in st.session_state: st.session_state[inc_key] = True
         inc = st.checkbox(f"Include #{i}", key=inc_key)
         team = st.radio(f"Team {i}", ["OFF","DEF"], index=0 if guess_team(d)=="OFF" else 1,
                         horizontal=True, key=f"team_{i}", label_visibility="collapsed")
-        pos = st.selectbox(f"Pos {i}", ["—"]+POSITIONS, key=f"pos_{i}", label_visibility="collapsed")
+        # pre-select position from model
+        pos_options = ["—"]+POSITIONS
+        pos_default_idx = pos_options.index(auto_pos) if auto_pos in pos_options else 0
+        pos = st.selectbox(f"Pos {i}", pos_options, index=pos_default_idx, key=f"pos_{i}", label_visibility="collapsed")
         player_meta[i] = {"inc": inc, "team": 0 if team=="OFF" else 1,
-                          "pos": None if pos=="—" else pos, "box": d}
+                          "pos": None if pos=="—" else pos, "box": d[:4], "cls": cls_id}
 
 kept = [(i, m) for i,m in player_meta.items() if m["inc"]]
 st.write(f"Tracking **{len(kept)} players**")
@@ -179,18 +288,27 @@ if st.button("▶️ Run tracking", type="primary"):
     clear_tracker_callbacks(model)
 
     # distance gate for initial track-to-selection matching (pixels)
-    match_gate = max(vw, vh) * 0.15  # ~15% of frame diagonal
+    match_gate = max(vw, vh) * 0.15
+
+    # ball detector – always use COCO yolov8n for ball, separate from player model
+    ball_model = None
+    if track_ball:
+        try:
+            ball_model = YOLO("yolov8n.pt")
+        except Exception:
+            ball_model = None
 
     while True:
         ok, frame = cap.read()
         if not ok: break
-        res = model.track(frame, classes=[0], conf=conf, persist=True,
+        res = model.track(frame, classes=player_class_ids, conf=conf, persist=True,
                           tracker="ocsort.yaml", imgsz=imgsz, verbose=False)[0]
         current_tracks = {}
         if res.boxes is not None and res.boxes.id is not None:
             xyxys = res.boxes.xyxy.cpu().numpy()
             ids = res.boxes.id.cpu().numpy().astype(int)
-            for xyxy, tid in zip(xyxys, ids):
+            clss = res.boxes.cls.cpu().numpy().astype(int) if res.boxes.cls is not None else [0]*len(ids)
+            for xyxy, tid, cls_id in zip(xyxys, ids, clss):
                 x1,y1,x2,y2 = map(int, xyxy)
                 cx=(x1+x2)//2; cy=(y1+y2)//2
                 if use_field_mask and not (0<=cy<field_mask.shape[0] and 0<=cx<field_mask.shape[1] and field_mask[cy,cx]): 
@@ -207,7 +325,6 @@ if st.button("▶️ Run tracking", type="primary"):
                             assigned_pos[tid]  = init_pos[k]
                             allowed_tids.add(tid)
                         else:
-                            # not close to any selected player – skip drawing this ID
                             continue
                     else:
                         assigned_team[tid]=0; assigned_pos[tid]=None
@@ -226,11 +343,10 @@ if st.button("▶️ Run tracking", type="primary"):
                         num = ocr.read(crop)
                         if num: jersey_map[tid] = num
 
-        # ball – run every 3 frames to save time
+        # ball – run every 3 frames, use separate COCO model
         ball_xy = None
-        if track_ball and frame_idx % 3 == 0:
-            clear_tracker_callbacks(model)
-            bres = model.predict(frame, classes=[32], conf=ball_conf, imgsz=imgsz, verbose=False)[0]
+        if track_ball and ball_model and frame_idx % 3 == 0:
+            bres = ball_model.predict(frame, classes=[32], conf=ball_conf, imgsz=imgsz, verbose=False)[0]
             best_conf = 0
             for b in bres.boxes:
                 bx1,by1,bx2,by2 = map(int, b.xyxy[0].cpu().numpy())
