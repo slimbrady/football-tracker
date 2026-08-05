@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pt
+output_*.mp4
+tracks.csv
+.venv/
