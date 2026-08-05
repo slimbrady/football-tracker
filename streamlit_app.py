@@ -89,6 +89,12 @@ def load_model(name):
     return YOLO(name)
 
 model = load_model(model_name)
+# clear any lingering tracker callbacks from cached model
+try:
+    if hasattr(model, 'predictor') and model.predictor and hasattr(model.predictor, 'callbacks'):
+        model.predictor.callbacks = {k: [] for k in model.predictor.callbacks}
+except Exception:
+    pass
 res = model.predict(first_frame, classes=[0], conf=conf, imgsz=imgsz, verbose=False)[0]
 dets = []
 for b in res.boxes:
