@@ -1,5 +1,13 @@
 tracker_type: ocsort
-# OC-SORT tuned for sports / football
+
+# ByteTracker base params (required by ultralytics>=8.3)
+track_high_thresh: 0.5
+track_low_thresh: 0.1
+new_track_thresh: 0.6
+track_buffer: 60
+match_thresh: 0.8
+
+# OC-SORT specific
 det_thresh: 0.25
 max_age: 60
 min_hits: 3
